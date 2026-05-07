@@ -1,10 +1,10 @@
-# Zeke's SOC618 (Social Network Analysis) Project
+# Network Analysis of Chicago Inter-Community Area Commuting
 
 To run the analysis, simply run all cells of `main.Rmd`, which sources `setup.R` to fetch the
 needed data.
 
-Also—apologies! This code is a bit of a mess—not normally my coding style, but once
-in a while it's good to let myself be less perfectionist. :)
+I apologize that this code is a bit of a mess. Normally my coding style is fairly perfectionist, but once
+in a while I think it's good to let myself "move fast and break things." :)
 
 ## Data Sources
 
