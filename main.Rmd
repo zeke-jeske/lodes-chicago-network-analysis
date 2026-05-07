@@ -60,12 +60,15 @@ g <- function(year) {
 }
 
 get_sf <- function(year) {
-  g(year) %>% activate(nodes) %>% as_tibble() %>% st_as_sf()
+  g(year) %>%
+    activate(nodes) %>%
+    as_tibble() %>%
+    st_as_sf()
 }
 
 # ── Entropy ───────────────────────────────────────────────────────────────────
 
-# Normalised Shannon entropy for a vector of flows, scaled to [0, 1].
+# Normalized Shannon entropy for a vector of flows, scaled to [0, 1].
 # n is the maximum possible number of distinct origins/destinations (total nodes
 # minus one, since self-loops are excluded), which sets the scale.
 entropy <- function(values, n = length(values)) {
@@ -75,9 +78,9 @@ entropy <- function(values, n = length(values)) {
 }
 
 stopifnot(
-  entropy(c(5, 5, 5), 3) == 1,    # perfectly uniform  -> max entropy
-  entropy(c(0, 0, 100), 3) == 0,  # single source      -> min entropy
-  entropy(c(100), 3) == 0         # single value       -> min entropy
+  entropy(c(5, 5, 5), 3) == 1, # perfectly uniform  -> max entropy
+  entropy(c(0, 0, 100), 3) == 0, # single source      -> min entropy
+  entropy(c(100), 3) == 0 # single value       -> min entropy
 )
 
 add_entropy <- function(g) {
@@ -87,11 +90,19 @@ add_entropy <- function(g) {
     mutate(
       in_entropy = map_dbl(1:N, \(node) {
         # In-flows to this node; max possible sources = N - 1 (no self-loops)
-        g %>% activate(edges) %>% filter(to   == node) %>% pull(n) %>% entropy(N - 1)
+        g %>%
+          activate(edges) %>%
+          filter(to == node) %>%
+          pull(n) %>%
+          entropy(N - 1)
       }),
       out_entropy = map_dbl(1:N, \(node) {
         # Out-flows from this node; max possible destinations = N - 1
-        g %>% activate(edges) %>% filter(from == node) %>% pull(n) %>% entropy(N - 1)
+        g %>%
+          activate(edges) %>%
+          filter(from == node) %>%
+          pull(n) %>%
+          entropy(N - 1)
       })
     )
 }
@@ -141,7 +152,7 @@ raw_change_map <- function(df, legend_title) {
   df %>%
     tm_shape() +
     tm_polygons(
-      fill       = "change",
+      fill = "change",
       fill.scale = tm_scale_continuous(
         values   = "brewer.rd_bu",
         limits   = c(-0.2, 0.2),
@@ -184,11 +195,11 @@ map_mean_distance <- function(year) {
 g2002 <- create_graph(cca_flows_2002) %>% add_entropy()
 g2022 <- create_graph(cca_flows_2022) %>% add_entropy()
 
-map_in_degree   <- map_by("in_degree",   "In-commuting flow",      "In-degree",              tm_scale_continuous_log(values = "brewer.oranges", limits = c(100,    300000)))
-map_out_degree  <- map_by("out_degree",  "Out-commuting flow",     "Out-degree",             tm_scale_continuous_log(values = "brewer.blues",   limits = c(500,     40000)))
-map_eigen       <- map_by("eigen",       "Eigenvector centrality", "Eigenvector Centrality", tm_scale_continuous_log(values = "viridis",         limits = c(0.0001,      1)))
-map_in_entropy  <- map_by("in_entropy",  "In-entropy",             "In-entropy",             tm_scale_continuous_log(values = "brewer.reds",    limits = c(0.75,        1)))
-map_out_entropy <- map_by("out_entropy", "Out-entropy",            "Out-entropy",            tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4,       0.9)))
+map_in_degree <- map_by("in_degree", "In-commuting flow", "In-degree", tm_scale_continuous_log(values = "brewer.oranges", limits = c(100, 300000)))
+map_out_degree <- map_by("out_degree", "Out-commuting flow", "Out-degree", tm_scale_continuous_log(values = "brewer.blues", limits = c(500, 40000)))
+map_eigen <- map_by("eigen", "Eigenvector centrality", "Eigenvector Centrality", tm_scale_continuous_log(values = "viridis", limits = c(0.0001, 1)))
+map_in_entropy <- map_by("in_entropy", "In-entropy", "In-entropy", tm_scale_continuous_log(values = "brewer.reds", limits = c(0.75, 1)))
+map_out_entropy <- map_by("out_entropy", "Out-entropy", "Out-entropy", tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4, 0.9)))
 
 vars <- c("in_degree", "out_degree", "eigen", "in_entropy", "out_entropy")
 
@@ -214,7 +225,9 @@ Not all LODES workers who work in Chicago live there; this table breaks down
 limits.
 
 ```{r commuter-origins}
-tract_to_cca <- tracts %>% as_tibble() %>% select(GEOID, cca)
+tract_to_cca <- tracts %>%
+  as_tibble() %>%
+  select(GEOID, cca)
 
 # cca_flows only covers intra-Chicago flows; re-join from raw tract data to
 # capture workers commuting in from outside the city
@@ -406,9 +419,9 @@ combined %>%
   mutate(variable = factor(variable, levels = names(var_labels), labels = var_labels)) %>%
   group_by(Variable = variable, Year = year) %>%
   summarize(
-    Mean   = mean(value),
-    SD     = sd(value),
-    SE     = SD / sqrt(n()),
+    Mean = mean(value),
+    SD = sd(value),
+    SE = SD / sqrt(n()),
     Median = median(value),
     .groups = "drop"
   ) %>%
@@ -479,7 +492,9 @@ get_dend <- function(g) {
 
 add_structural_equiv <- function(g) {
   if ("cluster" %in% colnames(g %>% activate(nodes) %>% as_tibble())) {
-    g <- g %>% activate(nodes) %>% select(-cluster)
+    g <- g %>%
+      activate(nodes) %>%
+      select(-cluster)
   }
   cluster_assignments <- cutree(get_dend(g), k = 5) %>%
     tibble(cluster = ., name = names(.))
@@ -493,7 +508,8 @@ g2022 <- add_structural_equiv(g2022)
 
 map_struct_equiv <- map_by(
   "cluster", "Structural equivalence class",
-  "Structural Equivalence Clusters", scale = tm_scale_categorical()
+  "Structural Equivalence Clusters",
+  scale = tm_scale_categorical()
 )
 tmap_arrange(map_struct_equiv(2002), map_struct_equiv(2022))
 
@@ -507,7 +523,7 @@ Regular equivalence (REGE) groups nodes whose neighbors are similarly
 structured, whether or not those nodes are directly connected to each other.
 
 ```{r regular-equiv}
-mat  <- as_adjacency_matrix(g2002, attr = "n", sparse = FALSE)
+mat <- as_adjacency_matrix(g2002, attr = "n", sparse = FALSE)
 rege <- REGE.nm.for(mat)$E
 dend <- hclust(as.dist(1 - rege), method = "ward.D")
 
@@ -643,7 +659,7 @@ chicago_only <- cca_graph %>%
 net <- asNetwork(chicago_only)
 
 net %v% "residents_log" <- log(chicago_only %>% activate(nodes) %>% pull(h_in_chicago))
-net %v% "workers_log"   <- log(chicago_only %>% activate(nodes) %>% pull(w_from_chicago))
+net %v% "workers_log" <- log(chicago_only %>% activate(nodes) %>% pull(w_from_chicago))
 
 # Full distance matrix; all dyads are represented in cca_flows
 D <- cca_flows_2022 %>%
@@ -657,13 +673,13 @@ D <- cca_flows_2022 %>%
 ```{r ergm-1, eval=FALSE, include=FALSE}
 fit1 <- ergm(
   net ~
-    sum +                          # baseline intensity
-    nonzero +                      # sparsity
-    nodeocov("residents_log") +    # origin size effect
-    nodeicov("workers_log") +      # destination size effect
-    edgecov(D),                    # distance deterrence
+    sum + # baseline intensity
+    nonzero + # sparsity
+    nodeocov("residents_log") + # origin size effect
+    nodeicov("workers_log") + # destination size effect
+    edgecov(D), # distance deterrence
   reference = ~Poisson,
-  response  = "n",
+  response = "n",
 )
 ```
 

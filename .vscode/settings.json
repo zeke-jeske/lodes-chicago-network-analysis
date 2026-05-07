@@ -5,5 +5,17 @@
     "markdown": false,
     "scminput": false,
     "yaml": false
-  }
+  },
+  "cSpell.words": [
+    "abline",
+    "dend",
+    "ecount",
+    "edgecov",
+    "Krivitsky",
+    "NUMBE",
+    "REGE",
+    "Simson",
+    "stopifnot",
+    "trunc"
+  ]
 }
