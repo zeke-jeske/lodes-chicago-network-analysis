@@ -55,7 +55,7 @@ if (file.exists(ccas_path)) {
     st_set_crs(crs)
 
     unlink(tmp_file)
-    write_sf(ccas_path, delete_dsn = TRUE)
+    write_sf(ccas, ccas_path, delete_dsn = TRUE)
   message(glue("Saved community area shapes to {ccas_path}"))
 }
 
