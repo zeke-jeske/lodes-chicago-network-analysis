@@ -2,16 +2,20 @@
 title: "Commuting Network Analysis Project"
 author: "Zeke Jeske"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    theme: readable
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
-# Fetch and load the data
 source("setup.R")
 
-# Load additional packages for visualization
 suppressPackageStartupMessages({
   library(igraph)
   library(tidygraph)
@@ -19,274 +23,304 @@ suppressPackageStartupMessages({
   library(tmap)
   library(ggrepel)
   library(blockmodeling)
-  library(knitr) # kable
+  library(knitr)
 })
 ```
 
-```{r utility-functions}
+This report analyzes Chicago's inter-neighborhood commuting network using
+LODES origin-destination data for 2002 and 2022. Each of the city's 77
+community areas (CCAs) is a node; the number of workers commuting between any
+two CCAs is a directed, weighted edge.
+
+```{r functions, include=FALSE}
+# ── Graph construction ────────────────────────────────────────────────────────
+
 create_graph <- function(flows) {
-  g <- tbl_graph(edges = flows, nodes = ccas) %>%
+  tbl_graph(edges = flows, nodes = ccas) %>%
     activate(edges) %>%
     mutate(
       from_name = .N()$name[from],
-      to_name = .N()$name[to]
+      to_name   = .N()$name[to]
     ) %>%
     activate(nodes) %>%
-    # Compute centrality measures
     mutate(
-      in_degree = centrality_degree(weights = n, mode = "in"),
+      in_degree  = centrality_degree(weights = n, mode = "in"),
       out_degree = centrality_degree(weights = n, mode = "out"),
-      eigen = centrality_eigen(weights = n, directed = TRUE, scale = TRUE)
+      eigen      = centrality_eigen(weights = n, directed = TRUE, scale = TRUE)
     )
 }
 
-g2002 <- create_graph(cca_flows_2002)
-g2022 <- create_graph(cca_flows_2022)
-# Get the commuting network for the given year
+# Convenience accessor used by map helpers below
 g <- function(year) {
-  if (year == 2002) {
-    g2002
-  } else if (year == 2022) {
-    g2022
-  } else {
-    stop("Only years allowed are 2002 and 2022")
-  }
+  switch(as.character(year),
+    "2002" = g2002,
+    "2022" = g2022,
+    stop("Only years 2002 and 2022 are available")
+  )
 }
 
 get_sf <- function(year) {
-  g(year) %>%
-    activate(nodes) %>%
-    as_tibble() %>%
-    st_as_sf()
+  g(year) %>% activate(nodes) %>% as_tibble() %>% st_as_sf()
 }
-```
 
-```{r}
-# Number of nodes
-g2022 %>% vcount()
-# Number of non-zero edges
-g2022 %E>% filter(n > 0) %>% ecount()
-```
+# ── Entropy ───────────────────────────────────────────────────────────────────
 
-**Compute entropy measures.** `igraph` implements entropy with the `diversity()` function, but only for undirected graphs, so
-we'll have to implement in- and out-entropy ourselves.
-
-```{r}
-# A generic function to compute the in- or out-entropy value for a single node,
-# given a vector of its in- or out-commuting flows.
+# Normalised Shannon entropy for a vector of flows, scaled to [0, 1].
+# n is the maximum possible number of distinct origins/destinations (total nodes
+# minus one, since self-loops are excluded), which sets the scale.
 entropy <- function(values, n = length(values)) {
   normed <- values / sum(values)
-  # 0 values don't contribute to the sum
+  # 0 * log(0) is defined as 0 in information theory; ifelse prevents NaN
   -sum(ifelse(normed == 0, 0, normed * log2(normed))) / log2(n)
 }
 
-# Tests. These all return TRUE.
-# entropy(c(5, 5, 5), 3) == 1
-# entropy(c(0,0,100), 3) == 0
-# entropy(c(100), 3) == 0
-```
+stopifnot(
+  entropy(c(5, 5, 5), 3) == 1,    # perfectly uniform  -> max entropy
+  entropy(c(0, 0, 100), 3) == 0,  # single source      -> min entropy
+  entropy(c(100), 3) == 0         # single value       -> min entropy
+)
 
-```{r}
-# Add in-entropy and out-entropy to the network objects!
-add_in_entropy <- function(g) {
-  if ("in_entropy" %in% colnames(g %N>% as_tibble())) {
-    warning("In-entropy has already been computed. Skipping.")
-    return(g)
-  }
-
+add_entropy <- function(g) {
+  N <- vcount(g)
   g %>%
     activate(nodes) %>%
     mutate(
-      in_entropy = map_dbl(1:vcount(g), \(node) {
-        # Get all in-commuting flows to this node
-        g %>%
-          activate(edges) %>%
-          filter(to == node) %>%
-          pull(n) %>%
-          # Maximum number of edges to this node is 1 less than total nodes
-          entropy(vcount(g) - 1)
+      in_entropy = map_dbl(1:N, \(node) {
+        # In-flows to this node; max possible sources = N - 1 (no self-loops)
+        g %>% activate(edges) %>% filter(to   == node) %>% pull(n) %>% entropy(N - 1)
+      }),
+      out_entropy = map_dbl(1:N, \(node) {
+        # Out-flows from this node; max possible destinations = N - 1
+        g %>% activate(edges) %>% filter(from == node) %>% pull(n) %>% entropy(N - 1)
       })
     )
 }
 
-add_out_entropy <- function(g) {
-  if ("out_entropy" %in% colnames(g %N>% as_tibble())) {
-    warning("Out-entropy has already been computed. Skipping.")
-    return(g)
-  }
+# ── Map helpers ───────────────────────────────────────────────────────────────
 
-  g %>%
-    activate(nodes) %>%
-    mutate(
-      out_entropy = map_dbl(1:vcount(g), \(node) {
-        # Get all out-commuting flows from this node
-        g %>%
-          activate(edges) %>%
-          filter(from == node) %>%
-          pull(n) %>%
-          # Maximum number of edges from this node is 1 less than total nodes
-          entropy(vcount(g) - 1)
-      })
-    )
-}
-
-g2002 <- g2002 %>% add_in_entropy() %>% add_out_entropy()
-g2022 <- g2022 %>% add_in_entropy() %>% add_out_entropy()
-```
-
-## What proportion of Chicago workers commute from outside Chicago?
-
-I use these figures in my data section.
-
-```{r}
-tract_flows <- read_csv("data/tract_flows_2022.csv", col_types = "cci")
-tract_to_cca <- tracts %>% as_tibble() %>% select(GEOID, cca)
-# The cca_flows data frames don't include anything outside Chicago, so we have
-# to do these joins again.
-tract_flows %>%
-  left_join(tract_to_cca, by = join_by(w_tract == GEOID)) %>%
-  rename(w_cca = cca) %>%
-  left_join(tract_to_cca, by = join_by(h_tract == GEOID)) %>%
-  rename(h_cca = cca) %>%
-  mutate(works_in_chicago = !is.na(w_cca), lives_in_chicago = !is.na(h_cca)) %>%
-  group_by(works_in_chicago, lives_in_chicago) %>%
-  summarize(n = sum(n), .groups = "drop")
-```
-
-## Node-link diagram
-
-```{r network-plot, fig.width=12, fig.height=8}
-set.seed(1)
-g2022 %>%
-  activate(edges) %>%
-  filter(n > quantile(n, 0.6)) %>% # Keep only the biggest flows
-  activate(nodes) %>%
-  # Meters to km
-  mutate(distance_from_loop = distance_from_loop / 1000) %>%
-  ggraph(layout = "fr") +
-  geom_edge_link(
-    aes(edge_alpha = n),
-    edge_width = 0.2, edge_color = "#000",
-  ) +
-  geom_node_point(aes(color = distance_from_loop), size = 3) +
-  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
-  theme_void() +
-  theme_graph(
-    plot_margin = margin(10, 10, 10, 10),
-  ) +
-  theme(
-    legend.background = element_rect(),
-    legend.margin = margin(8,8,8,8),
-    legend.position = "inside",
-    legend.position.inside = c(0.95, 0.05),
-    legend.justification = c(1, 0),
-    legend.box.just = "right",
-    legend.box.margin = margin(6, 6, 6, 6),
-  ) +
-  labs(
-    color = "Distance from the Loop, km",
-    edge_alpha = "Commuting flow"
-  )
-```
-## In-degree
-
-```{r in-degree-plot}
-# Higher-order function to create map plotting functions that change fill according to some variable
+# Returns a function `year -> tmap` that fills CCAs by `variable`
 map_by <- function(variable, legend_label, title, scale) {
   function(year) {
     get_sf(year) %>%
       tm_shape() +
       tm_polygons(
-        fill = variable,
+        fill        = variable,
         fill.legend = tm_legend(title = legend_label),
-        fill.scale = scale,
+        fill.scale  = scale,
       ) +
       tm_title(glue("{title} ({year})"))
   }
 }
 
-map_in_degree <- map_by("in_degree", "In-commuting flow", "Inter-CCA In-commuting", tm_scale_continuous_log(values = "brewer.oranges", limits = c(100, 300000)))
+# Diverging red-blue map showing percent change from 2002 to 2022.
+# limits = c(-1, 1) uses a fixed ±100% scale with labelled breaks;
+# limits = NULL lets tmap auto-fit the scale to the data.
+pct_change_map <- function(df, legend_title, limits = c(-1, 1)) {
+  fill_scale <- if (is.null(limits)) {
+    tm_scale_continuous(values = "brewer.rd_bu", midpoint = 0)
+  } else {
+    tm_scale_continuous(
+      values         = "brewer.rd_bu",
+      limits         = limits,
+      labels         = c("-100%", "-50%", "0%", "+50%", "+100% or more"),
+      midpoint       = 0,
+      outliers.trunc = c(TRUE, TRUE)
+    )
+  }
+  df %>%
+    tm_shape() +
+    tm_polygons(
+      fill        = "pct_change",
+      fill.scale  = fill_scale,
+      fill.legend = tm_legend(title = legend_title)
+    )
+}
 
-map_in_degree(2002)
-map_in_degree(2022)
+# Diverging red-blue map showing raw (absolute) change from 2002 to 2022
+raw_change_map <- function(df, legend_title) {
+  df %>%
+    tm_shape() +
+    tm_polygons(
+      fill       = "change",
+      fill.scale = tm_scale_continuous(
+        values   = "brewer.rd_bu",
+        limits   = c(-0.2, 0.2),
+        labels   = c("-0.2", "-0.1", "0", "+0.1", "+0.2"),
+        midpoint = 0
+      ),
+      fill.legend = tm_legend(title = legend_title)
+    )
+}
+
+# Returns a data frame of flow-weighted mean commute distance per CCA for `year`
+get_mean_distances <- function(year) {
+  g(year) %>%
+    activate(edges) %>%
+    as_tibble() %>%
+    # cca_distances is keyed by CCA name, not by the graph node indices
+    left_join(cca_distances, by = c("from_name" = "from", "to_name" = "to")) %>%
+    group_by(from_name) %>%
+    summarize(mean_distance = sum(n * distance) / sum(n), .groups = "drop") %>%
+    rename(name = from_name)
+}
+
+map_mean_distance <- function(year) {
+  g(year) %>%
+    activate(nodes) %>%
+    left_join(get_mean_distances(year), by = "name") %>%
+    as_tibble() %>%
+    st_as_sf() %>%
+    tm_shape() +
+    tm_polygons(
+      fill        = "mean_distance",
+      fill.legend = tm_legend(title = "Mean distance (m)"),
+      fill.scale  = tm_scale_continuous(values = "viridis", limits = c(4000, 25000))
+    ) +
+    tm_title(glue("Mean commute distance ({year})"))
+}
 ```
 
-Change in in-degree from 2002 to 2022.
+```{r data-prep, include=FALSE}
+g2002 <- create_graph(cca_flows_2002) %>% add_entropy()
+g2022 <- create_graph(cca_flows_2022) %>% add_entropy()
 
-```{r}
+map_in_degree   <- map_by("in_degree",   "In-commuting flow",      "In-degree",              tm_scale_continuous_log(values = "brewer.oranges", limits = c(100,    300000)))
+map_out_degree  <- map_by("out_degree",  "Out-commuting flow",     "Out-degree",             tm_scale_continuous_log(values = "brewer.blues",   limits = c(500,     40000)))
+map_eigen       <- map_by("eigen",       "Eigenvector centrality", "Eigenvector Centrality", tm_scale_continuous_log(values = "viridis",         limits = c(0.0001,      1)))
+map_in_entropy  <- map_by("in_entropy",  "In-entropy",             "In-entropy",             tm_scale_continuous_log(values = "brewer.reds",    limits = c(0.75,        1)))
+map_out_entropy <- map_by("out_entropy", "Out-entropy",            "Out-entropy",            tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4,       0.9)))
+
 vars <- c("in_degree", "out_degree", "eigen", "in_entropy", "out_entropy")
 
+# Geometry is taken from 2022; 2002 contributes only the metric columns
 combined <- left_join(
-  g2002 %N>% as_tibble() %>% select(name, all_of(vars)),
-  # geometry comes from this one
+  g2002 %>% activate(nodes) %>% as_tibble() %>% select(name, all_of(vars)),
   get_sf(2022) %>% select(name, all_of(vars)),
-  by = "name",
+  by     = "name",
   suffix = c("_2002", "_2022")
 ) %>% st_as_sf()
+```
 
-# Scatter plot (not used)
+## Network overview
+
+The 2022 network contains `r vcount(g2022)` nodes and
+`r g2022 %>% activate(edges) %>% filter(n > 0) %>% ecount()` non-zero directed
+edges.
+
+## Commuter origins
+
+Not all LODES workers who work in Chicago live there; this table breaks down
+2022 tract-level flows by whether the home and work tracts are inside city
+limits.
+
+```{r commuter-origins}
+tract_to_cca <- tracts %>% as_tibble() %>% select(GEOID, cca)
+
+# cca_flows only covers intra-Chicago flows; re-join from raw tract data to
+# capture workers commuting in from outside the city
+read_csv("data/tract_flows_2022.csv", col_types = "cci") %>%
+  left_join(tract_to_cca, by = join_by(w_tract == GEOID)) %>%
+  rename(w_cca = cca) %>%
+  left_join(tract_to_cca, by = join_by(h_tract == GEOID)) %>%
+  rename(h_cca = cca) %>%
+  mutate(
+    works_in_chicago = !is.na(w_cca),
+    lives_in_chicago = !is.na(h_cca)
+  ) %>%
+  group_by(works_in_chicago, lives_in_chicago) %>%
+  summarize(n = sum(n), .groups = "drop") %>%
+  kable(
+    col.names   = c("Works in Chicago", "Lives in Chicago", "Workers"),
+    format.args = list(big.mark = ",")
+  )
+```
+
+## Node–link diagram
+
+Edges are filtered to the top 40% of flows; nodes are colored by distance
+from the Loop.
+
+```{r network-plot, fig.width=12, fig.height=8}
+set.seed(1)
+g2022 %>%
+  activate(edges) %>%
+  filter(n > quantile(n, 0.6)) %>%
+  activate(nodes) %>%
+  mutate(distance_from_loop = distance_from_loop / 1000) %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), edge_width = 0.2, edge_color = "#000") +
+  geom_node_point(aes(color = distance_from_loop), size = 3) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  theme_void() +
+  theme_graph(plot_margin = margin(10, 10, 10, 10)) +
+  theme(
+    legend.background      = element_rect(),
+    legend.margin          = margin(8, 8, 8, 8),
+    legend.position        = "inside",
+    legend.position.inside = c(0.95, 0.05),
+    legend.justification   = c(1, 0),
+    legend.box.just        = "right",
+    legend.box.margin      = margin(6, 6, 6, 6),
+  ) +
+  labs(color = "Distance from the Loop (km)", edge_alpha = "Commuting flow")
+```
+
+## Centrality
+
+### In-degree
+
+Total weighted in-commuting flow to each CCA — how many workers commute *into*
+each neighborhood from another CCA.
+
+```{r in-degree}
+map_in_degree(2002)
+map_in_degree(2022)
 combined %>%
-  ggplot(aes(x = in_degree_2002, in_degree_2022)) +
+  mutate(pct_change = in_degree_2022 / in_degree_2002 - 1) %>%
+  pct_change_map("In-degree % change")
+```
+
+```{r in-degree-scatter, eval=FALSE, include=FALSE}
+# Scatter plot comparing 2002 vs. 2022 in-degree (kept for reference)
+combined %>%
+  ggplot(aes(x = in_degree_2002, y = in_degree_2022)) +
   geom_point() +
   geom_text_repel(aes(label = name)) +
   geom_abline(slope = 1, intercept = 0) +
   geom_smooth(se = FALSE) +
   scale_x_log10() +
   scale_y_log10()
-
-pct_change_map <- function(df, legend_title) {
-  df %>%
-  tm_shape() +
-  tm_polygons(
-    fill = "pct_change",
-    fill.scale = tm_scale_continuous(
-      values = "brewer.rd_bu", limits = c(-1, 1),
-      labels = c("-100%", "-50%", "0%", "+50%", "+100% or more"),
-      midpoint = 0,
-      outliers.trunc = c(TRUE, TRUE)
-    ),
-    fill.legend = tm_legend(title = legend_title)
-  )
-}
-
-combined %>%
-  mutate(
-    change = in_degree_2022 - in_degree_2002,
-    pct_change = in_degree_2022 / in_degree_2002 - 1
-  ) %>%
-  pct_change_map("In-degree % change")
 ```
 
-## Out-degree
+### Out-degree
 
-```{r out-degree-plot}
-map_out_degree <- map_by("out_degree", "Out-commuting flow", "Inter-CCA Out-commuting", tm_scale_continuous_log(values = "brewer.blues", limits = c(500, 40000)))
+Total weighted out-commuting flow from each CCA — how many workers leave each
+neighborhood to work somewhere else.
 
+```{r out-degree}
 map_out_degree(2002)
 map_out_degree(2022)
-
 combined %>%
-  mutate(
-    change = out_degree_2022 - out_degree_2002,
-    pct_change = out_degree_2022 / out_degree_2002 - 1
-  ) %>%
+  mutate(pct_change = out_degree_2022 / out_degree_2002 - 1) %>%
   pct_change_map("Out-degree % change")
 ```
 
-## Eigenvector centrality
+### Eigenvector centrality
 
-```{r}
-map_eigen <- map_by("eigen", "Eigenvector centrality", "Eigenvector Centrality",
-  tm_scale_continuous_log(values = "viridis", limits = c(0.0001, 1)))
+Eigenvector centrality weights a CCA's importance by the importance of its
+neighbors, capturing which areas are connected to other highly-connected areas.
+
+```{r eigen}
 map_eigen(2002)
 map_eigen(2022)
 combined %>%
   mutate(pct_change = eigen_2022 / eigen_2002 - 1) %>%
-  pct_change_map("Percent change")
+  pct_change_map("Eigenvector centrality % change")
 ```
 
-```{r eigen-vs-distance, eval = FALSE}
-# Not included
+<!-- Kept for reference; references undefined cca_graph and outdated variable names
+
+```{r eigen-vs-distance, eval=FALSE, include=FALSE}
 cca_graph %N>%
   as_tibble() %>%
   mutate(area = if_else(
@@ -301,50 +335,43 @@ cca_graph %N>%
   ggplot(aes(x = distance_from_loop, y = eig_centrality)) +
   geom_point(aes(color = area)) +
   geom_smooth(se = FALSE, method = "lm", size = 0.5, color = "black", formula = y ~ x) +
-  # geom_smooth(aes(color = area), se = FALSE, method = "lm", size = 0.5) +
   geom_text_repel(aes(label = name), size = 2) +
   scale_y_log10() +
   scale_color_brewer(palette = "Set1") +
   theme_classic() +
   labs(
-    title = "Eigenvector Centrality vs. Distance from the Loop",
-    subtitle = '"Northern" neighborhoods are those that are at least as far north as the Near West Side.',
-    x = "Distance from the Loop (m)",
-    y = "Eigenvector Centrality",
-    color = "Area"
+    title    = "Eigenvector Centrality vs. Distance from the Loop",
+    subtitle = '"Northern" neighborhoods are those at least as far north as the Near West Side.',
+    x        = "Distance from the Loop (m)",
+    y        = "Eigenvector Centrality",
+    color    = "Area"
   )
 ```
 
-## In-entropy
+-->
 
-```{r}
-map_in_entropy <- map_by("in_entropy", "In-entropy", "In-entropy",
-  tm_scale_continuous_log(values = "brewer.reds", limits = c(0.75, 1)))
+## Entropy
+
+### In-entropy
+
+In-entropy measures how evenly a CCA's in-commuting is spread across source
+neighborhoods; a value of 1 means workers arrive in equal numbers from all
+other CCAs.
+
+```{r in-entropy}
 map_in_entropy(2002)
 map_in_entropy(2022)
-raw_change_map <- function(df, legend_title) {
-  df %>%
-    tm_shape() +
-    tm_polygons(
-      fill = "change",
-      fill.scale = tm_scale_continuous(
-        values = "brewer.rd_bu", limits = c(-0.2, 0.2),
-        labels = c("-0.2", "-0.1", "0", "+0.1", "+0.2"),
-        midpoint = 0
-      ),
-      fill.legend = tm_legend(title = legend_title)
-    )
-}
 combined %>%
   mutate(change = in_entropy_2022 - in_entropy_2002) %>%
   raw_change_map("In-entropy change")
 ```
 
-## Out-entropy
+### Out-entropy
 
-```{r}
-map_out_entropy <- map_by("out_entropy", "Out-entropy", "Out-entropy",
-  tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4, 0.9)))
+Out-entropy measures how evenly a CCA's out-commuting is spread across
+destination neighborhoods.
+
+```{r out-entropy}
 map_out_entropy(2002)
 map_out_entropy(2022)
 combined %>%
@@ -352,90 +379,79 @@ combined %>%
   raw_change_map("Out-entropy change")
 ```
 
-## Table
+## Summary statistics
 
-```{r}
-df <- combined %>%
+Descriptive statistics for each metric across all 77 CCAs, plus paired t-tests
+comparing 2002 and 2022.
+
+```{r summary-stats}
+var_labels <- c(
+  in_degree   = "In-degree",
+  out_degree  = "Out-degree",
+  eigen       = "Eigenvector centrality",
+  in_entropy  = "In-entropy",
+  out_entropy = "Out-entropy"
+)
+
+# Descriptive statistics by variable and year
+combined %>%
   as_tibble() %>%
   select(name, contains("_20")) %>%
   pivot_longer(
     contains("_20"),
-    names_to = c("variable", "year"), values_to = "value",
+    names_to      = c("variable", "year"),
+    values_to     = "value",
     names_pattern = r"(^([a-z_]+)_(\d{4})$)"
   ) %>%
-  # This is the order of the variables I've been using in my paper
-  mutate(variable = factor(variable, levels = c("in_degree", "out_degree", "eigen", "in_entropy", "out_entropy"))) %>%
-  # Unpivot the years, which we want in separate columns so we can take the difference
-  pivot_wider(names_from = year, values_from = value, names_prefix = "value_") %>%
-  mutate(change = value_2022 - value_2002, pct_change = (value_2022 / value_2002 - 1) * 100) %>%
-  pivot_longer(
-    c(value_2002, value_2022, change, pct_change),
-    names_to = "subvariable", values_to = "value",
-    names_transform = . %>% str_replace("value_", "")
+  mutate(variable = factor(variable, levels = names(var_labels), labels = var_labels)) %>%
+  group_by(Variable = variable, Year = year) %>%
+  summarize(
+    Mean   = mean(value),
+    SD     = sd(value),
+    SE     = SD / sqrt(n()),
+    Median = median(value),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3, caption = "Descriptive statistics by variable and year")
+
+# Paired t-tests: 2022 vs. 2002
+map_dfr(names(var_labels), function(v) {
+  tt <- t.test(combined[[glue("{v}_2022")]], combined[[glue("{v}_2002")]], paired = TRUE)
+  tibble(
+    Variable      = var_labels[v],
+    `Mean 2002`   = mean(combined[[glue("{v}_2002")]]),
+    `Mean 2022`   = mean(combined[[glue("{v}_2022")]]),
+    `Mean change` = unname(tt$estimate),
+    `t`           = unname(tt$statistic),
+    `p-value`     = tt$p.value
   )
-
-df %>%
-  group_by(variable, subvariable) %>%
-  summarize(mean = mean(value), sd = sd(value), se = sd / sqrt(77), med = median(value))
-
-t.test(combined$in_degree_2022, combined$in_degree_2002, paired = TRUE)
-t.test(combined$out_degree_2022, combined$out_degree_2002, paired = TRUE)
-t.test(combined$eigen_2022, combined$eigen_2002, paired = TRUE)
-t.test(combined$in_entropy_2022, combined$in_entropy_2002, paired = TRUE)
-t.test(combined$out_entropy_2022, combined$out_entropy_2002, paired = TRUE)
-
-ggplot(combined, aes(x = eigen_2002)) +
-  geom_density()
+}) %>%
+  kable(digits = 3, caption = "Paired t-tests: 2022 vs. 2002")
 ```
 
 ## Mean distance commuted
 
-```{r}
-mean_distances <- g2002 %>%
-  activate(edges) %>%
-  as_tibble() %>%
-  # cca_distances uses CCA names, not the same indexes as the graphs
-  left_join(cca_distances, by = c("from_name" = "from", "to_name" = "to")) %>%
-  group_by(from_name) %>%
-  summarize(mean_distance = sum(n * distance) / sum(n)) %>%
-  rename(from = "from_name")
+Flow-weighted mean commute distance for residents of each CCA, highlighting
+which neighborhoods send workers farthest across the city.
 
-g2002 %>%
-  activate(nodes) %>%
-  left_join(mean_distances, by = c(name = "from")) %>%
-  as_tibble() %>%
-  st_as_sf() %>%
-  tm_shape() +
-  tm_polygons(
-    fill = "mean_distance",
-    fill.scale = tm_scale_continuous(values = "viridis", limits = c(4000, 25000))
-  )
-
-mean_distances2 <- g2022 %>%
-  activate(edges) %>%
-  as_tibble() %>%
-  # cca_distances uses CCA names, not the same indexes as the graphs
-  left_join(cca_distances, by = c("from_name" = "from", "to_name" = "to")) %>%
-  group_by(from_name) %>%
-  summarize(mean_distance = sum(n * distance) / sum(n)) %>%
-  rename(from = "from_name")
-
-g2022 %>%
-  activate(nodes) %>%
-  left_join(mean_distances2, by = c(name = "from")) %>%
-  as_tibble() %>%
-  st_as_sf() %>%
-  tm_shape() +
-  tm_polygons(
-    fill = "mean_distance",
-    fill.scale = tm_scale_continuous(values = "viridis", limits = c(4000, 25000))
-  )
+```{r mean-distance}
+map_mean_distance(2002)
+map_mean_distance(2022)
+get_sf(2022) %>%
+  select(name) %>%
+  left_join(get_mean_distances(2002) %>% rename(dist_2002 = mean_distance), by = "name") %>%
+  left_join(get_mean_distances(2022) %>% rename(dist_2022 = mean_distance), by = "name") %>%
+  mutate(pct_change = dist_2022 / dist_2002 - 1) %>%
+  pct_change_map("Mean distance % change", limits = NULL)
 ```
 
 ## K-cores
 
-```{r}
-g(2002) %>%
+K-core decomposition of the 2002 network, restricted to the top quartile of
+flows, identifies the dense commuting spine at the city's core.
+
+```{r k-cores}
+g2002 %>%
   activate(edges) %>%
   filter(n > quantile(n, 0.75)) %>%
   activate(nodes) %>%
@@ -448,35 +464,25 @@ g(2002) %>%
 
 ## Structural equivalence
 
-```{r}
+CCAs are grouped by Pearson correlation of their combined in- and
+out-commuting profiles; neighborhoods in the same cluster occupy similar
+structural positions in the network regardless of whether they are adjacent.
+
+```{r structural-equiv}
 get_dend <- function(g) {
   adj <- as_adjacency_matrix(g, attr = "n", sparse = FALSE)
-  # Group community areas with similar in *and* out commuting
+  # Stack rows and transposed columns so clustering reflects both in- and
+  # out-commuting simultaneously
   mtx_both <- rbind(adj, t(adj))
-
-  # Perform agglomerative clustering based on pairwise Pearson's correlations
   hclust(as.dist(1 - cor(mtx_both), upper = FALSE), method = "ward.D")
 }
+
 add_structural_equiv <- function(g) {
-  if ("cluster" %in% colnames(g %N>% as_tibble())) {
-    g <- g %>% select(-cluster)
+  if ("cluster" %in% colnames(g %>% activate(nodes) %>% as_tibble())) {
+    g <- g %>% activate(nodes) %>% select(-cluster)
   }
-
-  dendrogram <- get_dend(g)
-  # plot(dendrogram)
-
-  # Elbow plot shows that 5 clusters is a good choice for both years
-  # heights <- dendrogram$height
-  # num_clusters <- length(heights):1
-  # tibble(height = heights, num_clusters = num_clusters) %>%
-  #   filter(num_clusters <= 20) %>%
-  #   ggplot(aes(x = num_clusters, y = height)) +
-  #   geom_point() +
-  #   geom_line()
-
-  cluster_assignments <- cutree(dendrogram, k = 5) %>%
-    tibble(cluster = ., name = names(cluster))
-  # Add column to graph
+  cluster_assignments <- cutree(get_dend(g), k = 5) %>%
+    tibble(cluster = ., name = names(.))
   g %>%
     activate(nodes) %>%
     left_join(cluster_assignments, by = "name")
@@ -485,24 +491,33 @@ add_structural_equiv <- function(g) {
 g2002 <- add_structural_equiv(g2002)
 g2022 <- add_structural_equiv(g2022)
 
-map_struct_equiv <- map_by("cluster", "Structural equivalence class", "Structural Equivalence Clusters", scale = tm_scale_categorical())
+map_struct_equiv <- map_by(
+  "cluster", "Structural equivalence class",
+  "Structural Equivalence Clusters", scale = tm_scale_categorical()
+)
 tmap_arrange(map_struct_equiv(2002), map_struct_equiv(2022))
 
 plot(get_dend(g2002))
 plot(get_dend(g2022))
 ```
 
-## Regular equivalence/blockmodeling
+## Regular equivalence
 
-```{r}
-mat <- as_adjacency_matrix(g2002, attr = "n", sparse = FALSE)
+Regular equivalence (REGE) groups nodes whose neighbors are similarly
+structured, whether or not those nodes are directly connected to each other.
+
+```{r regular-equiv}
+mat  <- as_adjacency_matrix(g2002, attr = "n", sparse = FALSE)
 rege <- REGE.nm.for(mat)$E
 dend <- hclust(as.dist(1 - rege), method = "ward.D")
 
 plot(dend)
-
-plot.mat(mat, clu=cutree(dend, k=8))
+plot.mat(mat, clu = cutree(dend, k = 8))
 ```
+
+<!-- =============================================================
+     FEEDBACK NOTES (2025-04-17) — kept for reference, not rendered
+     =============================================================
 
 # Feedback 4/17/25
 
@@ -525,127 +540,112 @@ plot.mat(mat, clu=cutree(dend, k=8))
   - Only do descriptive statistics. Longitudinal preferably. Could use blockmodeling
     or community detection techniques or structural/regular equivalence.
 
+-->
+
+<!-- =============================================================
+     OLD IDEAS — kept for reference, not rendered
+     =============================================================
+
 # Old Ideas
 
 ## Where people who live in a given CCA work?
 
-One simple result we can draw from this dataset is simply where people who live in
-any given commuting area work. For example, below we compare the commuting flows for
-residents of Hyde Park and Woodlawn. Hyde Park and Woodlawn are adjacent, but
-because Hyde Park is home to the University of Chicago, most of its residents work there.
-Woodlawn, on the other hand, has a shortage of local jobs, so most Woodlawn residents
-commute to the Loop.
+One simple result we can draw from this dataset is simply where people who live
+in any given commuting area work. For example, below we compare the commuting
+flows for residents of Hyde Park and Woodlawn. Hyde Park and Woodlawn are
+adjacent, but because Hyde Park is home to the University of Chicago, most of
+its residents work there. Woodlawn, on the other hand, has a shortage of local
+jobs, so most Woodlawn residents commute to the Loop.
 
-```{r where-people-work-functions, eval = FALSE}
+```{r where-people-work, eval=FALSE, include=FALSE}
 where_do_people_work <- function(cca) {
   cca_flows_2022 %>%
     filter(from == cca) %>%
     select(to, n) %>%
     arrange(desc(n))
 }
+
 where_do_people_work_plot <- function(cca) {
-  # For debugging:
-  # cca <- "Woodlawn"
-  
   where_do_people_work(cca) %>%
     filter(to != "OUTSIDE CHICAGO") %>%
     mutate(is_source = to == cca) %>%
-    # Put the source community last so that its borders are on top (plotted last)
     arrange(is_source) %>%
-    # Must be left_join so that OUTSIDE CHICAGO is left out
     left_join(ccas, by = c("to" = "name")) %>%
-    # If you want to use a log scale, try this
-    # mutate(log_n = log10(n + 1)) %>%
     st_as_sf() %>%
     tm_shape() +
     tm_polygons(
-      fill = "n",
+      fill        = "n",
       fill.legend = tm_legend(title = "Number of Workers"),
-      col = "is_source",
-      col.scale = tm_scale_categorical(values = c(`TRUE` = "red", `FALSE` = "lightblue", `NA` = "lightblue")),
-      col.legend = tm_legend_hide(),
-      lwd = "is_source",
-      lwd.scale = tm_scale_categorical(values = c(`TRUE` = 2, `FALSE` = 0.5)),
-      lwd.legend = tm_legend_hide(),
+      col         = "is_source",
+      col.scale   = tm_scale_categorical(values = c(`TRUE` = "red", `FALSE` = "lightblue", `NA` = "lightblue")),
+      col.legend  = tm_legend_hide(),
+      lwd         = "is_source",
+      lwd.scale   = tm_scale_categorical(values = c(`TRUE` = 2, `FALSE` = 0.5)),
+      lwd.legend  = tm_legend_hide(),
     ) +
-    tm_title(
-      glue("Where do {cca} residents work?"),
-      size = 1.5
-    )
+    tm_title(glue("Where do {cca} residents work?"), size = 1.5)
 }
-where_do_people_work_plot("Woodlawn")
-where_do_people_work_plot("Hyde Park")
-```
 
+where_do_people_work_plot("North Lawndale")
+```
 
 ## Local jobs availability
 
-This plot shows the number of local jobs per working resident in each community area. In neighborhoods
-with the largest employment, like O'Hare and the Loop, there are many more jobs than working
-residents. By contrast, many neighborhoods have nearly ten times as many working residents as jobs,
-so almost everyone must commute.
+This plot shows the number of local jobs per working resident in each community
+area. In neighborhoods with the largest employment, like O'Hare and the Loop,
+there are many more jobs than working residents. By contrast, many
+neighborhoods have nearly ten times as many working residents as jobs, so
+almost everyone must commute.
 
-```{r jobs-availability, eval = FALSE}
+```{r jobs-availability, eval=FALSE, include=FALSE}
 ccas <- ccas %>%
   mutate(jobs_availability = w_total / h_total)
 
 ccas %>%
-  # filter(name != "Loop", , name != "Ohare") %>%
-  # mutate(pct_work_in_same = work_in_same / w_total * 100) %>%
   tm_shape() +
   tm_polygons(
-    fill = "jobs_availability",
+    fill        = "jobs_availability",
     fill.legend = tm_legend(title = "Jobs Availability"),
-    fill.scale = tm_scale_continuous_log10(values = "viridis"),
+    fill.scale  = tm_scale_continuous_log10(values = "viridis"),
   )
 ```
 
 ## Distance and flow size
 
-Intuitively, we would expect that commuting is higher between neighborhoods that are closer together.
+Intuitively, we would expect commuting to be higher between neighborhoods that
+are closer together.
 
-```{r distance-vs-size, eval = FALSE}
+```{r distance-vs-size, eval=FALSE, include=FALSE}
 cca_flows_2022 %>%
   filter(from != "OUTSIDE CHICAGO", to != "OUTSIDE CHICAGO") %>%
-  # Zero flows don't work with the log scale
   filter(n != 0) %>%
-  # Setting amount = 1 makes the y-scale get wacky
   ggplot(aes(x = distance, y = jitter(n, amount = 0.99))) +
-  # geom_density2d_filled() +
   geom_point(size = 1, alpha = 0.3) +
-  # geom_smooth(se = FALSE, method = "lm", size = 1, color = "steelblue") +
-  # scale_x_log10() +
   scale_y_log10() +
-  # scale_y_continuous(limits = c(0, 100)) +
   theme_minimal() +
   guides(fill = "none") +
-  labs(
-    title = "Distance vs. Flow Size",
-    x = "Distance (m)",
-    y = "Flow Size"
-  )
+  labs(title = "Distance vs. Flow Size", x = "Distance (m)", y = "Flow Size")
 ```
 
 ## Modeling Commuting Patterns with an ERGM
 
-Modeling this dataset with an exponential random graph model (ERGM) would help understand what factors determine where people
-work. However, the ERGMs we learned about in class only work with unweighted networks.
-Krivitsky (2012) extended the ERGM framework to networks with values that represent counts,
+Modeling this dataset with an exponential random graph model (ERGM) would
+help understand what factors determine where people work. However, the ERGMs
+we learned about in class only work with unweighted networks. Krivitsky (2012)
+extended the ERGM framework to networks with values that represent counts,
 which is what we have here.
 
-```{r ergm-setup, eval = FALSE}
-chicago_only <- cca_graph %N>%
+```{r ergm-setup, eval=FALSE, include=FALSE}
+chicago_only <- cca_graph %>%
+  activate(nodes) %>%
   filter(name != "OUTSIDE CHICAGO")
 
 net <- asNetwork(chicago_only)
 
-# Add node covariates
-net %v% "residents_log" <- log(chicago_only %N>% pull(h_in_chicago))
-net %v% "workers_log" <- log(chicago_only %N>% pull(w_from_chicago))
+net %v% "residents_log" <- log(chicago_only %>% activate(nodes) %>% pull(h_in_chicago))
+net %v% "workers_log"   <- log(chicago_only %>% activate(nodes) %>% pull(w_from_chicago))
 
-# Network covariate: geographic distances
-# Make a full distance matrix. Recall that all dyads are represented in
-# cca_flows, not just non-zero edges.
+# Full distance matrix; all dyads are represented in cca_flows
 D <- cca_flows_2022 %>%
   filter(from != "OUTSIDE CHICAGO", to != "OUTSIDE CHICAGO") %>%
   select(from, to, distance) %>%
@@ -654,15 +654,17 @@ D <- cca_flows_2022 %>%
   as.matrix()
 ```
 
-```{r ergm-1, eval = FALSE}
+```{r ergm-1, eval=FALSE, include=FALSE}
 fit1 <- ergm(
   net ~
-    sum + # baseline intensity
-    nonzero + # sparsity
-    nodeocov("residents_log") + # origin size effect
-    nodeicov("workers_log") + # destination size effect
-    edgecov(D), # deterrence by distance
+    sum +                          # baseline intensity
+    nonzero +                      # sparsity
+    nodeocov("residents_log") +    # origin size effect
+    nodeicov("workers_log") +      # destination size effect
+    edgecov(D),                    # distance deterrence
   reference = ~Poisson,
-  response = "n",
+  response  = "n",
 )
 ```
+
+-->
