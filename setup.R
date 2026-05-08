@@ -10,20 +10,20 @@ suppressPackageStartupMessages({
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 state <- "il"
-crs   <- 4269    # NAD83, the CRS used by tigris
+crs <- 4269 # NAD83, the CRS used by tigris
 years <- c(2002, 2022)
 
 # LODES OD: all jobs (JT00), in-state (main) workers
 lodes_base_url <- "https://lehd.ces.census.gov/data/lodes/LODES8/"
-lodes_part     <- "main"
-lodes_type     <- "JT00"
+lodes_part <- "main"
+lodes_type <- "JT00"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-data_dir           <- "data"
-ccas_path          <- file.path(data_dir, "ccas.geojson")
+data_dir <- "data"
+ccas_path <- file.path(data_dir, "ccas.geojson")
 cca_distances_path <- file.path(data_dir, "cca_distances.csv")
-tracts_path        <- file.path(data_dir, "tracts.geojson")
+tracts_path <- file.path(data_dir, "tracts.geojson")
 
 dir.create(data_dir, showWarnings = FALSE)
 
@@ -45,7 +45,7 @@ if (file.exists(ccas_path)) {
   ccas <- read_csv(tmp_file, show_col_types = FALSE) %>%
     transmute(
       name     = str_to_title(COMMUNITY),
-      num      = as.integer(AREA_NUMBE),  # AREA_NUMBE is truncated in the source, not a typo here
+      num      = as.integer(AREA_NUMBE), # AREA_NUMBE is truncated in the source, not a typo here
       geometry = the_geom,
     ) %>%
     st_as_sf(wkt = "geometry") %>%
@@ -67,7 +67,7 @@ if (file.exists(cca_distances_path)) {
   # crossing() produces both A→B and B→A for every pair
   cca_distances <- crossing(
     cca_centroids %>% rename(from = name, from_centroid = geometry),
-    cca_centroids %>% rename(to   = name, to_centroid   = geometry),
+    cca_centroids %>% rename(to = name, to_centroid = geometry),
   ) %>%
     mutate(
       .keep    = "unused",
@@ -107,9 +107,11 @@ if (file.exists(tracts_path)) {
   message("Assigning each tract to its CCA...")
   # A tract belongs to the CCA that contains its centroid
   tracts_with_cca <- suppressWarnings(st_centroid(tracts)) %>%
-    st_join(ccas, join = st_within, left = FALSE)  # left = FALSE drops tracts outside any CCA
+    st_join(ccas, join = st_within, left = FALSE) # left = FALSE drops tracts outside any CCA
 
-  dupes <- tracts_with_cca %>% count(GEOID) %>% filter(n > 1)
+  dupes <- tracts_with_cca %>%
+    count(GEOID) %>%
+    filter(n > 1)
   if (nrow(dupes) > 0) {
     warning(glue("These tracts matched multiple CCAs: {paste(dupes$GEOID, collapse = ', ')}"))
   }
@@ -133,7 +135,7 @@ cca_flows_by_year <- list()
 for (year in years) {
   block_flows_path <- file.path(data_dir, glue("block_flows_{year}.csv.gz"))
   tract_flows_path <- file.path(data_dir, glue("tract_flows_{year}.csv"))
-  cca_flows_path   <- file.path(data_dir, glue("cca_flows_{year}.csv"))
+  cca_flows_path <- file.path(data_dir, glue("cca_flows_{year}.csv"))
 
   # Block-level flows ----------------------------------------------------------
   if (file.exists(block_flows_path)) {
